@@ -1089,7 +1089,8 @@ def _render_preview_via_win32(
     xlsx_path: str,
     sheet_name: str,
     cell_range: str,
-    out_emf_path: str
+    out_emf_path: str,
+    excel_instance: Any = None
 ) -> Tuple[bool, Optional[float], Optional[float]]:
     """
     Primary path (Windows + Microsoft Office installed): use Excel COM automation
@@ -1099,11 +1100,15 @@ def _render_preview_via_win32(
     """
     if win32 is None or win32clipboard is None:
         return False, None, None
-    excel = None
+    owns_excel = False
+    excel = excel_instance
     try:
-        excel = win32.gencache.EnsureDispatch("Excel.Application")
-        excel.Visible = False
-        excel.DisplayAlerts = False
+        if excel is None:
+            excel = win32.gencache.EnsureDispatch("Excel.Application")
+            excel.Visible = False
+            excel.DisplayAlerts = False
+            excel.ScreenUpdating = False
+            owns_excel = True
         wb = excel.Workbooks.Open(os.path.abspath(xlsx_path))
         try:
             ws = wb.Sheets(sheet_name)
@@ -1144,11 +1149,9 @@ def _render_preview_via_win32(
     except Exception:
         return False, None, None
     finally:
-        if excel is not None:
+        if owns_excel and excel is not None:
             try:
                 excel.Quit()
-            except Exception:
-                pass
             except Exception:
                 pass
 
@@ -1419,6 +1422,39 @@ def _remove_docx_part(docx_path: str, part_name: str) -> None:
     os.replace(tmp_path, docx_path)
 
 
+_MONTH_PATTERNS = {
+    1: r'(?:jan|january)', 2: r'(?:feb|february)', 3: r'(?:mar|march)',
+    4: r'(?:apr|april)', 5: r'(?:may)', 6: r'(?:jun|june)',
+    7: r'(?:jul|july)', 8: r'(?:aug|august)', 9: r'(?:sep|sept|september)',
+    10: r'(?:oct|october)', 11: r'(?:nov|november)', 12: r'(?:dec|december)',
+}
+
+def _get_target_months(start_dt: Any, end_dt: Any) -> set:
+    months = set()
+    try:
+        cur_year, cur_month = start_dt.year, start_dt.month
+        end_year, end_month = end_dt.year, end_dt.month
+        while (cur_year < end_year) or (cur_year == end_year and cur_month <= end_month):
+            months.add(cur_month)
+            if cur_month == 12:
+                cur_year += 1
+                cur_month = 1
+            else:
+                cur_month += 1
+    except Exception:
+        pass
+    return months
+
+def _should_check_sheet(sheet_name: str, target_months: set) -> bool:
+    if not target_months:
+        return True
+    norm = sheet_name.strip().lower()
+    for m, pat in _MONTH_PATTERNS.items():
+        if re.search(pat, norm):
+            return m in target_months
+    return True
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # SERVICE
 # ──────────────────────────────────────────────────────────────────────────────
@@ -1430,6 +1466,26 @@ class BillGeneratorService:
         self.default_mapping_path = os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "company_mapping.xlsx"
         )
+        self._excel_sheets_cache: Dict[Tuple[str, float], Dict[str, pd.DataFrame]] = {}
+
+    def _get_cached_sheet(self, excel_path: str, sheet_name: str) -> Optional[pd.DataFrame]:
+        if not excel_path or not os.path.exists(excel_path):
+            return None
+        try:
+            mtime = os.path.getmtime(excel_path)
+            cache_key = (excel_path, mtime)
+            if cache_key not in self._excel_sheets_cache:
+                self._excel_sheets_cache[cache_key] = {}
+            if sheet_name in self._excel_sheets_cache[cache_key]:
+                return self._excel_sheets_cache[cache_key][sheet_name]
+
+            raw = pd.read_excel(excel_path, sheet_name=sheet_name, header=None, dtype=object)
+            if raw is not None and not raw.empty:
+                self._excel_sheets_cache[cache_key][sheet_name] = raw
+                return raw
+            return None
+        except Exception:
+            return None
 
     @staticmethod
     def check_word_dependencies() -> None:
@@ -1709,14 +1765,15 @@ class BillGeneratorService:
         names_by_key: Dict[str, str] = {}
         try:
             wb = pd.ExcelFile(excel_path)
+            all_sheets = wb.sheet_names
         except Exception:
             return []
 
-        for sheet in wb.sheet_names:
-            try:
-                raw = pd.read_excel(excel_path, sheet_name=sheet, header=None, dtype=object)
-            except Exception:
-                continue
+        target_months = _get_target_months(start_dt, end_dt)
+        sheets_to_scan = [s for s in all_sheets if _should_check_sheet(s, target_months)]
+
+        for sheet in sheets_to_scan:
+            raw = self._get_cached_sheet(excel_path, sheet)
             if raw is None or raw.empty:
                 continue
             hdr_idx = self.find_header_row(raw)
@@ -1731,7 +1788,7 @@ class BillGeneratorService:
             sc, dc, bc = lookup["SEN.UNIT"], lookup["DATE"], lookup["BILL"]
             if not sc or not dc or not bc:
                 continue
-            for _, row in data.iterrows():
+            for row in data.to_dict('records'):
                 dv = parse_date(row.get(dc, ""))
                 if dv is None or not (start_dt <= dv <= end_dt):
                     continue
@@ -1839,14 +1896,15 @@ class BillGeneratorService:
 
         try:
             wb = pd.ExcelFile(excel_path)
+            all_sheets = wb.sheet_names
         except Exception:
             return ([], debug) if return_debug else []
 
-        for sheet in wb.sheet_names:
-            try:
-                raw = pd.read_excel(excel_path, sheet_name=sheet, header=None, dtype=object)
-            except Exception:
-                continue
+        target_months = _get_target_months(start_dt, end_dt)
+        sheets_to_scan = [s for s in all_sheets if _should_check_sheet(s, target_months)]
+
+        for sheet in sheets_to_scan:
+            raw = self._get_cached_sheet(excel_path, sheet)
             if raw is None or raw.empty:
                 continue
             hdr_idx = self.find_header_row(raw)
@@ -1866,19 +1924,50 @@ class BillGeneratorService:
                 "WT. MT.":  self.resolve_header(headers, "WT. MT.", "WT MT", "WT. MT", "WT", "Weight"),
                 "RATE":     self.resolve_header(headers, "RATE", "Rate"),
                 "Remarks":  self.resolve_header(headers, "Remarks", "Remark"),
-                # "PAY" is the actual per-row billable amount column in the
-                # real source workbook (confirmed against the uploaded
-                # source Excel); a literal "TOTAL"/"Amount" header, when
-                # present, is tried too but PAY is listed first because in
-                # the real file a later, unrelated "TOTAL" column exists
-                # that is always 0 and must not be picked in its place.
                 "N":        self.resolve_header(headers, "PAY", "Pay", "N", "TOTAL", "Total", "Amount", "Amount Total"),
             }
 
-            for _, row in data.iterrows():
-                cv = clean_text(row.get(lk.get("SEN.UNIT", ""), ""))
-                dv = parse_date(row.get(lk.get("DATE", ""), ""))
-                bv = self.normalize_bill_value(row.get(lk.get("BILL", ""), ""))
+            broker_col_idx = None
+            for idx_h, h_name in enumerate(headers):
+                if normalize_header(h_name) in {"broker", "transporter", "lorryhire", "hire"}:
+                    broker_col_idx = idx_h
+                    break
+
+            cust_pay_col = None
+            cust_tot_col = None
+            if broker_col_idx is not None:
+                for idx_h in range(broker_col_idx):
+                    norm_h = normalize_header(headers[idx_h])
+                    if norm_h in {"pay", "custrate", "customerrate"}:
+                        cust_pay_col = headers[idx_h]
+                    elif norm_h in {"total", "amount", "freight", "custtotal"}:
+                        cust_tot_col = headers[idx_h]
+            else:
+                cust_pay_col = self.resolve_header(headers, "PAY", "Pay")
+                cust_tot_col = self.resolve_header(headers, "Total", "TOTAL", "Amount")
+
+            if not cust_pay_col and len(headers) > 9:
+                cust_pay_col = headers[9]
+            if not cust_tot_col and len(headers) > 10:
+                cust_tot_col = headers[10]
+
+            wt_col_7 = headers[7] if len(headers) > 7 else lk.get("WT. MT.", "")
+            wt_col_8 = headers[8] if len(headers) > 8 else None
+
+            sen_col = lk.get("SEN.UNIT", "")
+            date_col = lk.get("DATE", "")
+            bill_col = lk.get("BILL", "")
+            orig_col = lk.get("ORIGIN", "")
+            lr_col = lk.get("L.R.NO", "")
+            truck_col = lk.get("TRUCK No.", "")
+            town_col = lk.get("TOWN", "")
+            state_col = lk.get("STATE", "")
+            rem_col = lk.get("Remarks", "")
+
+            for row in data.to_dict('records'):
+                cv = clean_text(row.get(sen_col, ""))
+                dv = parse_date(row.get(date_col, ""))
+                bv = self.normalize_bill_value(row.get(bill_col, ""))
 
                 if self.normalize_company_name(cv) == company_key: debug["company_matches"] += 1
                 if dv is not None and start_dt <= dv <= end_dt:    debug["date_matches"] += 1
@@ -1888,36 +1977,8 @@ class BillGeneratorService:
                 if dv is None or not (start_dt <= dv <= end_dt):   continue
                 if not self.matches_bill_marker(bv, marker):       continue
 
-                # Customer Freight (Amount & Rate)
-                # In freight sheets, columns before BROKER belong to the Customer (e.g. PAY = rate, Total = customer amount).
-                # Columns after BROKER belong to the Broker/Transporter (e.g. RATE = broker rate, Total_2 = broker total).
-                broker_col_idx = None
-                for idx_h, h_name in enumerate(headers):
-                    if normalize_header(h_name) in {"broker", "transporter", "lorryhire", "hire"}:
-                        broker_col_idx = idx_h
-                        break
-
-                cust_pay_val = None
-                cust_tot_val = None
-                if broker_col_idx is not None:
-                    for idx_h in range(broker_col_idx):
-                        norm_h = normalize_header(headers[idx_h])
-                        if norm_h in {"pay", "custrate", "customerrate"}:
-                            cust_pay_val = row.iloc[idx_h]
-                        elif norm_h in {"total", "amount", "freight", "custtotal"}:
-                            cust_tot_val = row.iloc[idx_h]
-                else:
-                    pay_h = self.resolve_header(headers, "PAY", "Pay")
-                    if pay_h:
-                        cust_pay_val = row.get(pay_h)
-                    tot_h = self.resolve_header(headers, "Total", "TOTAL", "Amount")
-                    if tot_h:
-                        cust_tot_val = row.get(tot_h)
-
-                if cust_pay_val is None and len(row) > 9:
-                    cust_pay_val = row.iloc[9]
-                if cust_tot_val is None and len(row) > 10:
-                    cust_tot_val = row.iloc[10]
+                cust_pay_val = row.get(cust_pay_col) if cust_pay_col else None
+                cust_tot_val = row.get(cust_tot_col) if cust_tot_col else None
 
                 amt_num = parse_amount(cust_tot_val)
                 if amt_num is None or amt_num == 0:
@@ -1933,23 +1994,23 @@ class BillGeneratorService:
                     rate_str = str(rounded_amount)
 
                 # WT from column H (index 7) first, fallback to I (index 8) with FIX logic
-                h_raw = row.iloc[7] if len(row) > 7 else row.get(lk.get("WT. MT.", ""), "")
-                i_raw = row.iloc[8] if len(row) > 8 else None
+                h_raw = row.get(wt_col_7, "") if wt_col_7 else ""
+                i_raw = row.get(wt_col_8, "") if wt_col_8 else None
                 wt_str = format_wt_value(h_raw, i_raw)
 
                 matches.append({
                     "company":  cv,
-                    "origin":   clean_text(row.get(lk.get("ORIGIN", ""), "")) if lk.get("ORIGIN") else "",
+                    "origin":   clean_text(row.get(orig_col, "")) if orig_col else "",
                     "date":     dv,
                     "date_text": dv.strftime("%d.%m.%y"),
-                    "lr_no":    format_lr(row.get(lk.get("L.R.NO", ""), "")),
-                    "truck_no": clean_text(row.get(lk.get("TRUCK No.", ""), "")),
-                    "town":     clean_text(row.get(lk.get("TOWN", ""), "")),
-                    "state":    clean_text(row.get(lk.get("STATE", ""), "")),
+                    "lr_no":    format_lr(row.get(lr_col, "")),
+                    "truck_no": clean_text(row.get(truck_col, "")),
+                    "town":     clean_text(row.get(town_col, "")),
+                    "state":    clean_text(row.get(state_col, "")),
                     "wt_value": wt_str,
                     "rate":     rate_str,
                     "amount":   rounded_amount,
-                    "remarks":  clean_text(row.get(lk.get("Remarks", ""), "")),
+                    "remarks":  clean_text(row.get(rem_col, "")),
                     "sheet":    sheet,
                     "sac_code": sac_code or DEFAULT_BILL_SAC_CODE,
                 })
@@ -2241,49 +2302,61 @@ class BillGeneratorService:
         shape_width_pt = ole_info.shape_width_pt or 478.5
         shape_width_dxa = int(round(shape_width_pt * 20))
 
-        with tempfile.TemporaryDirectory() as tmp:
-            # ── Update Grand Total Embedded OLE Object (Microsoft_Excel_Worksheet1.xlsx) ──
-            tot_part_name = "word/embeddings/Microsoft_Excel_Worksheet1.xlsx"
-            with zipfile.ZipFile(template_path, "r") as z_tot:
-                if tot_part_name in z_tot.namelist():
-                    orig_tot_xlsx = z_tot.read(tot_part_name)
-                    updated_tot_xlsx = _update_grand_total_xlsx(orig_tot_xlsx, gt, amount_words)
-                    docx_replacements[tot_part_name] = updated_tot_xlsx
+        excel_session = None
+        if win32 is not None:
+            try:
+                excel_session = win32.gencache.EnsureDispatch("Excel.Application")
+                excel_session.Visible = False
+                excel_session.DisplayAlerts = False
+                excel_session.ScreenUpdating = False
+                excel_session.EnableEvents = False
+            except Exception:
+                excel_session = None
 
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                # ── Update Grand Total Embedded OLE Object (Microsoft_Excel_Worksheet1.xlsx) ──
+                tot_part_name = "word/embeddings/Microsoft_Excel_Worksheet1.xlsx"
+                with zipfile.ZipFile(template_path, "r") as z_tot:
+                    if tot_part_name in z_tot.namelist():
+                        orig_tot_xlsx = z_tot.read(tot_part_name)
+                        updated_tot_xlsx = _update_grand_total_xlsx(orig_tot_xlsx, gt, amount_words)
+                        docx_replacements[tot_part_name] = updated_tot_xlsx
+
+                        if win32 is not None:
+                            tmp_tot_xlsx = os.path.join(tmp, "grand_total.xlsx")
+                            with open(tmp_tot_xlsx, "wb") as f_tot:
+                                f_tot.write(updated_tot_xlsx)
+                            tmp_tot_emf = os.path.join(tmp, "preview_total.emf")
+                            ok_tot, _, _ = _render_preview_via_win32(tmp_tot_xlsx, "Sheet1", "A1:J2", tmp_tot_emf, excel_instance=excel_session)
+                            if ok_tot and os.path.exists(tmp_tot_emf):
+                                with open(tmp_tot_emf, "rb") as f_tot_emf:
+                                    docx_replacements["word/media/image2.emf"] = f_tot_emf.read()
+
+                for route_num, ((origin, dest), route_rows) in enumerate(route_groups.items(), start=1):
+                    route_subtotal = int(round(sum(float(r.get("amount", 0) or 0) for r in route_rows)))
+
+                    # Fill route workbook with ONLY this route's data
+                    route_xlsx_bytes, route_ole_size_ref, route_total_rows = _fill_embedded_workbook(
+                        xlsx_bytes=template_xlsx_bytes,
+                        ole_info=ole_info,
+                        rows=route_rows,
+                        subtotal=route_subtotal,
+                    )
+
+                    route_xlsx_tmp = os.path.join(tmp, f"route_{route_num}.xlsx")
+                    with open(route_xlsx_tmp, "wb") as f:
+                        f.write(route_xlsx_bytes)
+
+                    route_img_bytes = None
+                    route_img_ext = "emf"
+                    measured_w = None
+                    measured_h = None
+
+                    # Primary: native Windows Excel COM (vector EMF)
                     if win32 is not None:
-                        tmp_tot_xlsx = os.path.join(tmp, "grand_total.xlsx")
-                        with open(tmp_tot_xlsx, "wb") as f_tot:
-                            f_tot.write(updated_tot_xlsx)
-                        tmp_tot_emf = os.path.join(tmp, "preview_total.emf")
-                        ok_tot, _, _ = _render_preview_via_win32(tmp_tot_xlsx, "Sheet1", "A1:J2", tmp_tot_emf)
-                        if ok_tot and os.path.exists(tmp_tot_emf):
-                            with open(tmp_tot_emf, "rb") as f_tot_emf:
-                                docx_replacements["word/media/image2.emf"] = f_tot_emf.read()
-
-            for route_num, ((origin, dest), route_rows) in enumerate(route_groups.items(), start=1):
-                route_subtotal = int(round(sum(float(r.get("amount", 0) or 0) for r in route_rows)))
-
-                # Fill route workbook with ONLY this route's data
-                route_xlsx_bytes, route_ole_size_ref, route_total_rows = _fill_embedded_workbook(
-                    xlsx_bytes=template_xlsx_bytes,
-                    ole_info=ole_info,
-                    rows=route_rows,
-                    subtotal=route_subtotal,
-                )
-
-                route_xlsx_tmp = os.path.join(tmp, f"route_{route_num}.xlsx")
-                with open(route_xlsx_tmp, "wb") as f:
-                    f.write(route_xlsx_bytes)
-
-                route_img_bytes = None
-                route_img_ext = "emf"
-                measured_w = None
-                measured_h = None
-
-                # Primary: native Windows Excel COM (vector EMF)
-                if win32 is not None:
-                    tmp_emf = os.path.join(tmp, f"preview_{route_num}.emf")
-                    ok, m_w, m_h = _render_preview_via_win32(route_xlsx_tmp, ole_info.sheet_name, route_ole_size_ref, tmp_emf)
+                        tmp_emf = os.path.join(tmp, f"preview_{route_num}.emf")
+                        ok, m_w, m_h = _render_preview_via_win32(route_xlsx_tmp, ole_info.sheet_name, route_ole_size_ref, tmp_emf, excel_instance=excel_session)
                     if ok:
                         with open(tmp_emf, "rb") as f:
                             route_img_bytes = f.read()
@@ -2430,6 +2503,12 @@ class BillGeneratorService:
                     if f"{{{w14_ns}}}paraId" in cloned_spacing.attrib:
                         cloned_spacing.attrib[f"{{{w14_ns}}}paraId"] = f"{0x11000002 + route_num * 2:08X}"
                     new_route_elements.append(cloned_spacing)
+        finally:
+            if excel_session is not None:
+                try:
+                    excel_session.Quit()
+                except Exception:
+                    pass
 
         # ── Step 5: Replace template route block in body with new elements ──
         for elem in body_children[replace_start:replace_end]:

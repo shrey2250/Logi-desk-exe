@@ -5,6 +5,7 @@ import os
 import math
 import re
 import uuid
+import threading
 from datetime import date, datetime
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
@@ -1201,22 +1202,30 @@ class TallyConverterApp(ctk.CTk):
             self.bill_company_combo.configure(state="disabled")
             return
 
-        names = self.bill_service.get_company_names_for_period(
-            self.bill_excel_path,
-            start_date,
-            end_date,
-            self.bill_marker_combo.get().strip() or "+",
-        )
+        marker = self.bill_marker_combo.get().strip() or "+"
+        self.bill_company_combo.configure(values=["Loading companies…"])
+        self.bill_company_combo.set("Loading companies…")
+        self.bill_company_combo.configure(state="disabled")
 
-        if not names:
-            self.bill_company_combo.configure(values=["No company data for period"])
-            self.bill_company_combo.set("No company data for period")
-            self.bill_company_combo.configure(state="disabled")
-            return
+        def _fetch():
+            names = self.bill_service.get_company_names_for_period(
+                self.bill_excel_path,
+                start_date,
+                end_date,
+                marker,
+            )
+            def _apply():
+                if not names:
+                    self.bill_company_combo.configure(values=["No company data for period"])
+                    self.bill_company_combo.set("No company data for period")
+                    self.bill_company_combo.configure(state="disabled")
+                else:
+                    self.bill_company_combo.configure(values=names)
+                    self.bill_company_combo.set(names[0] if len(names) == 1 else "Select company")
+                    self.bill_company_combo.configure(state="normal")
+            self.after(0, _apply)
 
-        self.bill_company_combo.configure(values=names)
-        self.bill_company_combo.set(names[0] if len(names) == 1 else "Select company")
-        self.bill_company_combo.configure(state="normal")
+        threading.Thread(target=_fetch, daemon=True).start()
 
     def select_bill_excel(self):
         path = filedialog.askopenfilename(title="Select Excel Source", filetypes=[("Excel Files", "*.xlsx *.xls"), ("All Files", "*.*")])
@@ -1318,25 +1327,39 @@ class TallyConverterApp(ctk.CTk):
         if not output_path:
             return
 
-        try:
-            result = self.bill_service.generate_bill_document(
-                excel_path=excel_path,
-                company_name=company_name,
-                start_date=start_date,
-                end_date=end_date,
-                bill_marker=marker,
-                bill_no=bill_no,
-                bill_date=bill_date,
-                sac_code=self.bill_sac_entry.get().strip() or DEFAULT_BILL_SAC_CODE,
-                mapping_path=mapping_path,
-                output_path=output_path,
-                template_path=template_path,
-            )
-            messagebox.showinfo("Bill Generated", f"Bill saved successfully.\n\nRows: {result['rows']}\nRoutes: {result['routes']}\nGrand Total: ₹{result['grand_total']:,.2f}\n\nFile:\n{output_path}")
-            self._set_status("✓ Bill generated", self.GREEN)
-        except Exception as exc:
-            messagebox.showerror("Bill Generation Error", f"Could not generate the bill:\n\n{exc}")
-            self._set_status("⚠ Bill generation failed", self.RED)
+        sac_code = self.bill_sac_entry.get().strip() or DEFAULT_BILL_SAC_CODE
+
+        self.generate_bill_button.configure(state="disabled", text="Generating Bill…")
+        self._set_status("⏳ Generating bill... please wait", self.T_SECONDARY)
+
+        def _worker():
+            try:
+                result = self.bill_service.generate_bill_document(
+                    excel_path=excel_path,
+                    company_name=company_name,
+                    start_date=start_date,
+                    end_date=end_date,
+                    bill_marker=marker,
+                    bill_no=bill_no,
+                    bill_date=bill_date,
+                    sac_code=sac_code,
+                    mapping_path=mapping_path,
+                    output_path=output_path,
+                    template_path=template_path,
+                )
+                def _on_success():
+                    self.generate_bill_button.configure(state="normal", text="Generate Word Bill →")
+                    messagebox.showinfo("Bill Generated", f"Bill saved successfully.\n\nRows: {result['rows']}\nRoutes: {result['routes']}\nGrand Total: ₹{result['grand_total']:,.2f}\n\nFile:\n{output_path}")
+                    self._set_status("✓ Bill generated", self.GREEN)
+                self.after(0, _on_success)
+            except Exception as exc:
+                def _on_error():
+                    self.generate_bill_button.configure(state="normal", text="Generate Word Bill →")
+                    messagebox.showerror("Bill Generation Error", f"Could not generate the bill:\n\n{exc}")
+                    self._set_status("⚠ Bill generation failed", self.RED)
+                self.after(0, _on_error)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _build_output_panels(self, parent, h_pad):
         outer = ctk.CTkFrame(parent, fg_color="transparent")
