@@ -981,7 +981,12 @@ def _fill_embedded_workbook(
 
     amt_col = hm.get("amount", "G")
     cell_tot_amt = ws[f"{amt_col}{total_row_idx}"]
-    cell_tot_amt.value = val_to_set
+    if n_rows > 0:
+        first_r = ole_info.first_data_row
+        last_r = first_r + n_rows - 1
+        cell_tot_amt.value = f"=SUM({amt_col}{first_r}:{amt_col}{last_r})"
+    else:
+        cell_tot_amt.value = val_to_set
     if Alignment is not None:
         vert = cell_tot_amt.alignment.vertical if cell_tot_amt.alignment else None
         cell_tot_amt.alignment = Alignment(horizontal="center", vertical=vert)
@@ -989,7 +994,12 @@ def _fill_embedded_workbook(
     for c in range(1, max_c + 1):
         cell = ws.cell(row=total_row_idx, column=c)
         if cell.value is not None and str(cell.value).strip() == "[TOTAL]":
-            cell.value = val_to_set
+            if n_rows > 0:
+                first_r = ole_info.first_data_row
+                last_r = first_r + n_rows - 1
+                cell.value = f"=SUM({amt_col}{first_r}:{amt_col}{last_r})"
+            else:
+                cell.value = val_to_set
 
     # Determine active columns from header map
     max_header_idx = max(_col_idx(col_let) for col_let in hm.values()) if hm else 9
