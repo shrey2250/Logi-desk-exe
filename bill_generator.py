@@ -2583,6 +2583,158 @@ class BillGeneratorService:
 
         os.replace(tmp_out, output_path)
 
+    def recalculate_bill_document(self, docx_path: str) -> Dict[str, Any]:
+        """
+        Scans an existing generated .docx bill, reads every route table's latest data
+        and subtotal (including any manual edits made in Microsoft Word), sums them up,
+        and automatically updates the Grand Total and Indian Rupees in Words inside
+        the document's Grand Total OLE object and its on-page preview image.
+        """
+        if not docx_path or not os.path.exists(docx_path):
+            raise FileNotFoundError(f"Bill document not found: {docx_path}")
+
+        # Check if file is currently open / locked by Word
+        try:
+            with open(docx_path, "r+b") as test_f:
+                pass
+        except PermissionError:
+            raise PermissionError(
+                f"'{os.path.basename(docx_path)}' is currently open in Microsoft Word.\n\n"
+                "Please save (Ctrl+S) and close it in Word first, then click Recalculate again."
+            )
+        except Exception as e:
+            raise RuntimeError(f"Cannot access file {os.path.basename(docx_path)}: {e}")
+
+        with zipfile.ZipFile(docx_path, "r") as z:
+            all_parts = {name: z.read(name) for name in z.namelist()}
+
+        if "word/document.xml" not in all_parts or "word/_rels/document.xml.rels" not in all_parts:
+            raise ValueError("Invalid Word document: missing document.xml or relationships.")
+
+        parser = etree.XMLParser(recover=True, remove_blank_text=False)
+        doc_tree = etree.fromstring(all_parts["word/document.xml"], parser)
+        rels_tree = etree.fromstring(all_parts["word/_rels/document.xml.rels"], parser)
+
+        w_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        o_ns = "urn:schemas-microsoft-com:office:office"
+        v_ns = "urn:schemas-microsoft-com:vml"
+        r_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        nsmap = {"w": w_ns, "o": o_ns, "v": v_ns, "r": r_ns}
+        rels_map = {rel.get("Id"): rel.get("Target") for rel in rels_tree}
+
+        gt_item = None
+        route_subtotals = []
+
+        for obj in doc_tree.xpath(".//o:OLEObject", namespaces=nsmap):
+            pkg_rid = obj.get(f"{{{r_ns}}}id")
+            pkg_target = rels_map.get(pkg_rid, "")
+            pkg_part = "word/" + pkg_target if not pkg_target.startswith("word/") else pkg_target
+            if pkg_part not in all_parts:
+                continue
+
+            parent_shape = obj.getparent()
+            imagedata = parent_shape.xpath(".//v:imagedata", namespaces=nsmap) if parent_shape is not None else []
+            img_rid = imagedata[0].get(f"{{{r_ns}}}id") if imagedata else None
+            img_target = rels_map.get(img_rid, "") if img_rid else None
+            img_part = ("word/" + img_target if not img_target.startswith("word/") else img_target) if img_target else None
+
+            wb = openpyxl.load_workbook(io.BytesIO(all_parts[pkg_part]), data_only=False)
+            ws = wb.active
+
+            # Identify Grand Total table: has max_row <= 2 and cell containing 'GRAND TOTAL'
+            is_gt = False
+            for r in range(1, min(ws.max_row, 3) + 1):
+                for c in range(1, min(ws.max_column, 5) + 1):
+                    val_str = str(ws.cell(r, c).value or "").upper()
+                    if "GRAND TOTAL" in val_str:
+                        is_gt = True
+                        break
+
+            if is_gt:
+                gt_item = {"pkg_part": pkg_part, "img_part": img_part, "ws_bytes": all_parts[pkg_part]}
+                continue
+
+            # Amount column (default column G / 7)
+            amt_col = 7
+            for c in range(1, ws.max_column + 1):
+                if str(ws.cell(1, c).value or "").strip().upper() == "AMOUNT":
+                    amt_col = c
+                    break
+
+            # Find total row
+            tot_row = ws.max_row
+            for r in range(ws.max_row, 0, -1):
+                if any(str(ws.cell(r, c).value or "").strip().upper() == "TOTAL" for c in range(1, ws.max_column + 1)):
+                    tot_row = r
+                    break
+
+            cell_tot = ws.cell(tot_row, amt_col).value
+            subtotal = None
+            if cell_tot is not None and not str(cell_tot).strip().startswith("="):
+                try:
+                    subtotal = float(str(cell_tot).replace(",", "").strip())
+                except ValueError:
+                    pass
+
+            if subtotal is None:
+                # Sum data rows (from row 2 up to tot_row - 1, ignoring empty spacer)
+                subtotal = 0.0
+                for r in range(2, tot_row):
+                    v = ws.cell(r, amt_col).value
+                    if v is not None:
+                        try:
+                            subtotal += float(str(v).replace(",", "").strip())
+                        except ValueError:
+                            pass
+
+            route_subtotals.append((pkg_part, subtotal))
+
+        if not route_subtotals:
+            raise ValueError("No route tables found in the document to recalculate.")
+        if gt_item is None:
+            raise ValueError("Could not find the Grand Total table inside the document.")
+
+        calc_gt = int(round(sum(s for _, s in route_subtotals)))
+        words = amount_to_words_inr(calc_gt)
+        total_str = format_indian_currency(calc_gt)
+
+        # Update Grand Total workbook
+        gt_wb = openpyxl.load_workbook(io.BytesIO(gt_item["ws_bytes"]))
+        gt_ws = gt_wb.active
+        gt_ws["A1"] = f"GRAND TOTAL:- {total_str}"
+        gt_ws["A2"] = words
+
+        buf = io.BytesIO()
+        gt_wb.save(buf)
+        updated_gt_bytes = buf.getvalue()
+        all_parts[gt_item["pkg_part"]] = updated_gt_bytes
+
+        # Update preview image via Excel COM (or fallback)
+        if gt_item.get("img_part"):
+            with tempfile.TemporaryDirectory() as tmp:
+                tmp_xlsx = os.path.join(tmp, "gt_recalc.xlsx")
+                tmp_emf = os.path.join(tmp, "gt_recalc.emf")
+                with open(tmp_xlsx, "wb") as f:
+                    f.write(updated_gt_bytes)
+                ok, _, _ = _render_preview_via_win32(tmp_xlsx, gt_ws.title, "A1:J2", tmp_emf)
+                if ok and os.path.exists(tmp_emf):
+                    with open(tmp_emf, "rb") as f_emf:
+                        all_parts[gt_item["img_part"]] = f_emf.read()
+
+        tmp_out = docx_path + ".tmp"
+        with zipfile.ZipFile(tmp_out, "w", zipfile.ZIP_DEFLATED) as zout:
+            for name, data in all_parts.items():
+                zout.writestr(name, data)
+
+        os.replace(tmp_out, docx_path)
+
+        return {
+            "routes_count": len(route_subtotals),
+            "grand_total": calc_gt,
+            "amount_words": words,
+            "docx_path": docx_path,
+        }
+
 
 
 if __name__ == "__main__":

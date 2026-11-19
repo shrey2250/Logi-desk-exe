@@ -234,6 +234,7 @@ class TallyConverterApp(ctk.CTk):
         self.bill_excel_path = ""
         self.bill_mapping_path = ""
         self.bill_template_path = ""
+        self.recalc_bill_path = ""
 
         self.xml_frame_root = None
         self.bill_frame_root = None
@@ -1173,6 +1174,32 @@ class TallyConverterApp(ctk.CTk):
         self.generate_bill_button = self._primary_btn(content7, "Generate Word Bill →", self.generate_bill_from_ui, width=190)
         self.generate_bill_button.pack(anchor="w")
 
+        content8 = self._step_row(parent, h_pad, "07", "Recalculate Word Bill Totals", top_pad=24)
+        content8.grid_columnconfigure(0, weight=1)
+
+        hint = ctk.CTkLabel(
+            content8,
+            text="If you manually added or edited rows/totals in Microsoft Word, save & close Word, then click recalculate to update the Grand Total and Indian Rupees in Words automatically.",
+            font=self.F_TINY,
+            text_color=self.T_MUTED,
+            anchor="w",
+            wraplength=620,
+            justify="left",
+        )
+        hint.pack(anchor="w", pady=(0, 8))
+
+        recalc_row = ctk.CTkFrame(content8, fg_color="transparent")
+        recalc_row.pack(fill="x")
+        recalc_row.grid_columnconfigure(0, weight=1)
+
+        self.recalc_bill_label = self._ghost_label(recalc_row, "No bill selected for recalculation")
+        self.recalc_bill_label.grid(row=0, column=0, sticky="ew", padx=(0, 10))
+
+        self._secondary_btn(recalc_row, "Choose Bill…", self.select_recalc_bill, width=110).grid(row=0, column=1, padx=(0, 10))
+
+        self.recalc_bill_button = self._primary_btn(recalc_row, "🔄 Recalculate Totals", self.recalculate_bill_from_ui, width=170)
+        self.recalc_bill_button.grid(row=0, column=2)
+
     def _refresh_bill_company_options(self, event=None):
         if not self.bill_excel_path:
             self.bill_company_combo.configure(values=["Select Excel first"])
@@ -1349,6 +1376,9 @@ class TallyConverterApp(ctk.CTk):
                 )
                 def _on_success():
                     self.generate_bill_button.configure(state="normal", text="Generate Word Bill →")
+                    self.recalc_bill_path = output_path
+                    if hasattr(self, "recalc_bill_label") and self.recalc_bill_label:
+                        self.recalc_bill_label.configure(text=os.path.basename(output_path), text_color=self.T_PRIMARY)
                     messagebox.showinfo("Bill Generated", f"Bill saved successfully.\n\nRows: {result['rows']}\nRoutes: {result['routes']}\nGrand Total: ₹{result['grand_total']:,.2f}\n\nFile:\n{output_path}")
                     self._set_status("✓ Bill generated", self.GREEN)
                 self.after(0, _on_success)
@@ -1357,6 +1387,66 @@ class TallyConverterApp(ctk.CTk):
                     self.generate_bill_button.configure(state="normal", text="Generate Word Bill →")
                     messagebox.showerror("Bill Generation Error", f"Could not generate the bill:\n\n{exc}")
                     self._set_status("⚠ Bill generation failed", self.RED)
+                self.after(0, _on_error)
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def select_recalc_bill(self):
+        path = filedialog.askopenfilename(
+            title="Select Word Bill to Recalculate",
+            filetypes=[("Word Documents", "*.docx"), ("All Files", "*.*")],
+        )
+        if not path:
+            return
+        self.recalc_bill_path = path
+        self.recalc_bill_label.configure(text=os.path.basename(path), text_color=self.T_PRIMARY)
+        self._set_status(f"✓ Selected for recalculation: {os.path.basename(path)}", self.GREEN)
+
+    def recalculate_bill_from_ui(self):
+        docx_path = (self.recalc_bill_path or "").strip()
+        if not docx_path:
+            messagebox.showwarning(
+                "No Bill Selected",
+                "Please choose a Word bill document (.docx) to recalculate first."
+            )
+            return
+
+        if not os.path.exists(docx_path):
+            messagebox.showerror(
+                "File Not Found",
+                f"The bill file was not found:\n\n{docx_path}"
+            )
+            return
+
+        self.recalc_bill_button.configure(state="disabled", text="Recalculating…")
+        self._set_status("⏳ Recalculating bill totals...", self.T_SECONDARY)
+
+        def _worker():
+            try:
+                result = self.bill_service.recalculate_bill_document(docx_path)
+                def _on_success():
+                    self.recalc_bill_button.configure(state="normal", text="🔄 Recalculate Totals")
+                    msg = (
+                        "Bill Totals Recalculated Successfully!\n\n"
+                        f"Routes Scanned: {result['routes_count']}\n"
+                        f"New Grand Total: ₹{result['grand_total']:,.2f}\n\n"
+                        f"Rupees in Words:\n{result['amount_words']}\n\n"
+                        f"Document updated:\n{os.path.basename(docx_path)}"
+                    )
+                    messagebox.showinfo("Recalculation Complete", msg)
+                    self._set_status(f"✓ Grand Total updated: ₹{result['grand_total']:,.2f}", self.GREEN)
+                self.after(0, _on_success)
+            except PermissionError as pe:
+                def _on_perm_error():
+                    self.recalc_bill_button.configure(state="normal", text="🔄 Recalculate Totals")
+                    messagebox.showwarning("File Open in Word", str(pe))
+                    self._set_status("⚠ Please close Word before recalculating", self.RED)
+                self.after(0, _on_perm_error)
+            except Exception as exc:
+                def _on_error():
+                    self.recalc_bill_button.configure(state="normal", text="🔄 Recalculate Totals")
+                    messagebox.showerror("Recalculation Error", f"Could not recalculate bill totals:\n\n{exc}")
+                    self._set_status("⚠ Recalculation failed", self.RED)
                 self.after(0, _on_error)
 
         threading.Thread(target=_worker, daemon=True).start()
