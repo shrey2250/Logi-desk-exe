@@ -2204,6 +2204,50 @@ class BillGeneratorService:
         parser = etree.XMLParser(recover=True, remove_blank_text=False)
         doc_tree = etree.fromstring(doc_xml_bytes, parser)
 
+        w_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+        v_ns = "urn:schemas-microsoft-com:vml"
+        o_ns = "urn:schemas-microsoft-com:office:office"
+        r_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+        w14_ns = "http://schemas.microsoft.com/office/word/2010/wordml"
+        nsmap = {"w": w_ns, "v": v_ns, "o": o_ns, "r": r_ns, "w14": w14_ns}
+
+        bodies = doc_tree.xpath("./w:body", namespaces=nsmap)
+        if not bodies:
+            raise ValueError("Invalid document.xml: <w:body> not found.")
+        body = bodies[0]
+
+        # Check if the "BILL OF SUPPLY" line is currently in document.xml body.
+        # If so, move it to the document header so that Bill No, Bill of Supply,
+        # and Date repeat at the top of EVERY new continuation page!
+        bill_header_p = None
+        for p in body.xpath("./w:p", namespaces=nsmap):
+            txt = "".join(p.xpath(".//w:t/text()", namespaces=nsmap))
+            if "BILL OF SUPPLY" in txt:
+                bill_header_p = p
+                break
+
+        # Read all headers and footers from template
+        header_trees = {}
+        target_hdr_tree = None
+        with zipfile.ZipFile(template_path, "r") as z:
+            for n in z.namelist():
+                if (n.startswith("word/header") or n.startswith("word/footer")) and n.endswith(".xml"):
+                    hdr_xml = z.read(n)
+                    htree = etree.fromstring(hdr_xml, parser)
+                    header_trees[n] = htree
+                    htxt = "".join(htree.xpath(".//w:t/text()", namespaces=nsmap))
+                    if ("SHREY" in htxt or "LOGISTICS" in htxt or len(htree.xpath("./w:p", namespaces=nsmap)) > 1) and n.startswith("word/header"):
+                        target_hdr_tree = htree
+
+        if target_hdr_tree is None and "word/header2.xml" in header_trees:
+            target_hdr_tree = header_trees["word/header2.xml"]
+
+        if bill_header_p is not None and target_hdr_tree is not None:
+            target_hdr_txt = "".join(target_hdr_tree.xpath(".//w:t/text()", namespaces=nsmap))
+            if "BILL OF SUPPLY" not in target_hdr_txt:
+                target_hdr_tree.append(copy_module.deepcopy(bill_header_p))
+                body.remove(bill_header_p)
+
         # Text placeholder replacements
         addr1 = company_record.get("address_line_1", "").rstrip(", ")
         addr2 = company_record.get("address_line_2", "").rstrip(", ")
@@ -2234,28 +2278,12 @@ class BillGeneratorService:
         }
         _replace_placeholders_in_lxml(doc_tree, replacements)
 
-        # Also replace placeholders in all headers and footers so Bill No, Date, etc. repeat on every page
         header_replacements = {}
-        with zipfile.ZipFile(template_path, "r") as z:
-            for n in z.namelist():
-                if (n.startswith("word/header") or n.startswith("word/footer")) and n.endswith(".xml"):
-                    hdr_xml = z.read(n)
-                    hdr_tree = etree.fromstring(hdr_xml, parser)
-                    _replace_placeholders_in_lxml(hdr_tree, replacements, is_header=True)
-                    header_replacements[n] = etree.tostring(hdr_tree, encoding="utf-8", xml_declaration=True, standalone=True)
+        for n, htree in header_trees.items():
+            _replace_placeholders_in_lxml(htree, replacements, is_header=True)
+            header_replacements[n] = etree.tostring(htree, encoding="utf-8", xml_declaration=True, standalone=True)
 
         # ── Step 3: Locate route block in body ──
-        w_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-        v_ns = "urn:schemas-microsoft-com:vml"
-        o_ns = "urn:schemas-microsoft-com:office:office"
-        r_ns = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
-        w14_ns = "http://schemas.microsoft.com/office/word/2010/wordml"
-        nsmap = {"w": w_ns, "v": v_ns, "o": o_ns, "r": r_ns, "w14": w14_ns}
-
-        bodies = doc_tree.xpath("./w:body", namespaces=nsmap)
-        if not bodies:
-            raise ValueError("Invalid document.xml: <w:body> not found.")
-        body = bodies[0]
         body_children = list(body)
 
         ole_elem = None
@@ -2725,6 +2753,37 @@ class BillGeneratorService:
                 if ok and os.path.exists(tmp_emf):
                     with open(tmp_emf, "rb") as f_emf:
                         all_parts[gt_item["img_part"]] = f_emf.read()
+
+        # Ensure "BILL OF SUPPLY" line is placed in header so it repeats on every continuation page
+        if "word/document.xml" in all_parts:
+            try:
+                parser = etree.XMLParser(recover=True, remove_blank_text=False)
+                doc_tree = etree.fromstring(all_parts["word/document.xml"], parser)
+                w_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+                nsmap = {"w": w_ns}
+                body_elems = doc_tree.xpath("./w:body", namespaces=nsmap)
+                if body_elems:
+                    b = body_elems[0]
+                    bill_header_p = None
+                    for p in b.xpath("./w:p", namespaces=nsmap):
+                        txt = "".join(p.xpath(".//w:t/text()", namespaces=nsmap))
+                        if "BILL OF SUPPLY" in txt:
+                            bill_header_p = p
+                            break
+
+                    if bill_header_p is not None:
+                        for part_name in list(all_parts.keys()):
+                            if part_name.startswith("word/header") and part_name.endswith(".xml"):
+                                htree = etree.fromstring(all_parts[part_name], parser)
+                                htxt = "".join(htree.xpath(".//w:t/text()", namespaces=nsmap))
+                                if ("SHREY" in htxt or "LOGISTICS" in htxt or len(htree.xpath("./w:p", namespaces=nsmap)) > 1) and "BILL OF SUPPLY" not in htxt:
+                                    htree.append(copy_module.deepcopy(bill_header_p))
+                                    b.remove(bill_header_p)
+                                    all_parts[part_name] = etree.tostring(htree, encoding="utf-8", xml_declaration=True, standalone=True)
+                                    all_parts["word/document.xml"] = etree.tostring(doc_tree, encoding="utf-8", xml_declaration=True, standalone=True)
+                                    break
+            except Exception:
+                pass
 
         tmp_out = docx_path + ".tmp"
         with zipfile.ZipFile(tmp_out, "w", zipfile.ZIP_DEFLATED) as zout:
