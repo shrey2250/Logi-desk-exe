@@ -1355,10 +1355,11 @@ class TallyConverterApp(ctk.CTk):
             )
             return
 
+        initial_filename = self._format_bill_filename(bill_no, bill_date)
         output_path = filedialog.asksaveasfilename(
             title="Save Bill as Word Document",
             defaultextension=".docx",
-            initialfile=f"{company_name}_{bill_no}.docx",
+            initialfile=initial_filename,
             filetypes=[("Word Documents", "*.docx"), ("All Files", "*.*")],
         )
         if not output_path:
@@ -1398,6 +1399,47 @@ class TallyConverterApp(ctk.CTk):
                 self.after(0, _on_error)
 
         threading.Thread(target=_worker, daemon=True).start()
+
+    @staticmethod
+    def _format_bill_filename(bill_no: str, bill_date: str = "") -> str:
+        s = str(bill_no).strip()
+
+        # Pattern 1: e.g. "26-27/003", "26-27-003", "26-27/3" -> BILL COPY 003-26-27.docx
+        m1 = re.match(r"^(\d{2}-\d{2})[-/](\d+)$", s)
+        if m1:
+            year, num = m1.group(1), int(m1.group(2))
+            return f"BILL COPY {num:03d}-{year}.docx"
+
+        # Pattern 2: e.g. "003-26-27", "3-26-27", "003/26-27" -> BILL COPY 003-26-27.docx
+        m2 = re.match(r"^(\d+)[-/](\d{2}-\d{2})$", s)
+        if m2:
+            num, year = int(m2.group(1)), m2.group(2)
+            return f"BILL COPY {num:03d}-{year}.docx"
+
+        # Pattern 3: e.g. "26-27/44A"
+        m3 = re.match(r"^(\d{2}-\d{2})[-/](.+)$", s)
+        if m3:
+            year, num_part = m3.group(1), m3.group(2)
+            if num_part.isdigit():
+                return f"BILL COPY {int(num_part):03d}-{year}.docx"
+            return f"BILL COPY {num_part}-{year}.docx"
+
+        # Pattern 4: just numbers e.g. "3" or "003" or "44"
+        if s.isdigit():
+            num = int(s)
+            fy = "26-27"
+            if bill_date:
+                m_dt = re.search(r"(\d{2})$", str(bill_date).strip())
+                if m_dt:
+                    y = int(m_dt.group(1))
+                    fy = f"{y:02d}-{y+1:02d}"
+            return f"BILL COPY {num:03d}-{fy}.docx"
+
+        # Fallback: clean invalid filename characters and ensure "BILL COPY" prefix
+        cleaned = re.sub(r'[/\\:*?"<>|]+', '-', s).strip(" -")
+        if cleaned.upper().startswith("BILL COPY"):
+            return f"{cleaned}.docx"
+        return f"BILL COPY {cleaned}.docx"
 
     def _get_recent_bills_file(self) -> str:
         cfg_dir = os.path.join(os.path.expanduser("~"), ".logidesk")
