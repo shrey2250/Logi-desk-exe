@@ -1,0 +1,25 @@
+# Environments
+.venv/
+env/
+venv/
+ENV/
+
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyInstaller & Build artifacts
+build/
+dist/
+*.manifest
+*.spec.bak
+*.exe
+
+# Generated Bills & Output files
+*_*.docx
+
+# Temporary / test files
+*.bak
+*.tmp
+*.docx.tmp
+test_*.docx
