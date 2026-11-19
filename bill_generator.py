@@ -2354,155 +2354,156 @@ class BillGeneratorService:
                     measured_h = None
 
                     # Primary: native Windows Excel COM (vector EMF)
+                    ok = False
                     if win32 is not None:
                         tmp_emf = os.path.join(tmp, f"preview_{route_num}.emf")
                         ok, m_w, m_h = _render_preview_via_win32(route_xlsx_tmp, ole_info.sheet_name, route_ole_size_ref, tmp_emf, excel_instance=excel_session)
-                    if ok:
-                        with open(tmp_emf, "rb") as f:
-                            route_img_bytes = f.read()
-                        route_img_ext = "emf"
-                        measured_w = m_w
-                        measured_h = m_h
+                        if ok:
+                            with open(tmp_emf, "rb") as f:
+                                route_img_bytes = f.read()
+                            route_img_ext = "emf"
+                            measured_w = m_w
+                            measured_h = m_h
 
-                # Fallback: LibreOffice PNG
-                if route_img_bytes is None:
-                    tmp_png = os.path.join(tmp, f"preview_{route_num}.png")
-                    if _render_preview_via_libreoffice(route_xlsx_tmp, route_ole_size_ref, tmp_png):
-                        with open(tmp_png, "rb") as f:
-                            route_img_bytes = f.read()
-                        route_img_ext = "png"
+                    # Fallback: LibreOffice PNG
+                    if route_img_bytes is None:
+                        tmp_png = os.path.join(tmp, f"preview_{route_num}.png")
+                        if _render_preview_via_libreoffice(route_xlsx_tmp, route_ole_size_ref, tmp_png):
+                            with open(tmp_png, "rb") as f:
+                                route_img_bytes = f.read()
+                            route_img_ext = "png"
 
-                # Fallback: template image
-                if route_img_bytes is None:
-                    route_img_bytes = template_img_bytes
-                    route_img_ext = "emf" if (ole_info.image_part and ole_info.image_part.endswith(".emf")) else "png"
+                    # Fallback: template image
+                    if route_img_bytes is None:
+                        route_img_bytes = template_img_bytes
+                        route_img_ext = "emf" if (ole_info.image_part and ole_info.image_part.endswith(".emf")) else "png"
 
-                # Height & Width calculation: match exact live Excel COM measurements
-                # so the table is created at its full bigger size and stays the same size when clicked
-                route_width_pt = measured_w if (measured_w is not None) else 487.2
-                route_height_pt = measured_h if (measured_h is not None) else (17.25 + (route_total_rows - 1) * 14.5)
-                shape_width_dxa = int(round(route_width_pt * 20))
-                route_dya = int(round(route_height_pt * 20))
+                    # Height & Width calculation: match exact live Excel COM measurements
+                    # so the table is created at its full bigger size and stays the same size when clicked
+                    route_width_pt = measured_w if (measured_w is not None) else 487.2
+                    route_height_pt = measured_h if (measured_h is not None) else (17.25 + (route_total_rows - 1) * 14.5)
+                    shape_width_dxa = int(round(route_width_pt * 20))
+                    route_dya = int(round(route_height_pt * 20))
 
-                img_rid = f"rId{next_rid_num}"
-                next_rid_num += 1
-                pkg_rid = f"rId{next_rid_num}"
-                next_rid_num += 1
+                    img_rid = f"rId{next_rid_num}"
+                    next_rid_num += 1
+                    pkg_rid = f"rId{next_rid_num}"
+                    next_rid_num += 1
 
-                shape_id = f"_x0000_i{1044 + route_num - 1}"
-                object_id = f"_{1851433745 + route_num - 1}"
+                    shape_id = f"_x0000_i{1044 + route_num - 1}"
+                    object_id = f"_{1851433745 + route_num - 1}"
 
-                pkg_filename = f"Microsoft_Excel_Worksheet_Route{route_num}.xlsx"
-                pkg_part_name = f"word/embeddings/{pkg_filename}"
-                pkg_target = f"embeddings/{pkg_filename}"
+                    pkg_filename = f"Microsoft_Excel_Worksheet_Route{route_num}.xlsx"
+                    pkg_part_name = f"word/embeddings/{pkg_filename}"
+                    pkg_target = f"embeddings/{pkg_filename}"
 
-                img_filename = f"image_route_{route_num}.{route_img_ext}"
-                img_part_name = f"word/media/{img_filename}"
-                img_target = f"media/{img_filename}"
+                    img_filename = f"image_route_{route_num}.{route_img_ext}"
+                    img_part_name = f"word/media/{img_filename}"
+                    img_target = f"media/{img_filename}"
 
-                docx_replacements[pkg_part_name] = route_xlsx_bytes
-                docx_replacements[img_part_name] = route_img_bytes
+                    docx_replacements[pkg_part_name] = route_xlsx_bytes
+                    docx_replacements[img_part_name] = route_img_bytes
 
-                rels_to_add.append((img_rid, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", img_target))
-                rels_to_add.append((pkg_rid, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/package", pkg_target))
+                    rels_to_add.append((img_rid, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image", img_target))
+                    rels_to_add.append((pkg_rid, "http://schemas.openxmlformats.org/officeDocument/2006/relationships/package", pkg_target))
 
-                # Cloned heading
-                cloned_heading = copy_module.deepcopy(heading_elem)
-                if f"{{{w14_ns}}}paraId" in cloned_heading.attrib:
-                    cloned_heading.attrib[f"{{{w14_ns}}}paraId"] = f"{0x11000000 + route_num * 2:08X}"
+                    # Cloned heading
+                    cloned_heading = copy_module.deepcopy(heading_elem)
+                    if f"{{{w14_ns}}}paraId" in cloned_heading.attrib:
+                        cloned_heading.attrib[f"{{{w14_ns}}}paraId"] = f"{0x11000000 + route_num * 2:08X}"
 
-                # Keep heading together with the table (prevent page break between heading and table)
-                p_prs = cloned_heading.xpath("./w:pPr", namespaces=nsmap)
-                if not p_prs:
-                    p_pr = etree.Element(f"{{{w_ns}}}pPr")
-                    cloned_heading.insert(0, p_pr)
-                else:
-                    p_pr = p_prs[0]
+                    # Keep heading together with the table (prevent page break between heading and table)
+                    p_prs = cloned_heading.xpath("./w:pPr", namespaces=nsmap)
+                    if not p_prs:
+                        p_pr = etree.Element(f"{{{w_ns}}}pPr")
+                        cloned_heading.insert(0, p_pr)
+                    else:
+                        p_pr = p_prs[0]
 
-                if not p_pr.xpath("./w:keepNext", namespaces=nsmap):
-                    p_pr.append(etree.Element(f"{{{w_ns}}}keepNext"))
-                if not p_pr.xpath("./w:keepLines", namespaces=nsmap):
-                    p_pr.append(etree.Element(f"{{{w_ns}}}keepLines"))
+                    if not p_pr.xpath("./w:keepNext", namespaces=nsmap):
+                        p_pr.append(etree.Element(f"{{{w_ns}}}keepNext"))
+                    if not p_pr.xpath("./w:keepLines", namespaces=nsmap):
+                        p_pr.append(etree.Element(f"{{{w_ns}}}keepLines"))
 
-                # Tight paragraph spacing so heading and table are visually and structurally bonded
-                sp_nodes = p_pr.xpath("./w:spacing", namespaces=nsmap)
-                if not sp_nodes:
-                    sp_elem = etree.Element(f"{{{w_ns}}}spacing")
-                    sp_elem.set(f"{{{w_ns}}}before", "100" if route_num > 1 else "0")
-                    sp_elem.set(f"{{{w_ns}}}after", "20")
-                    sp_elem.set(f"{{{w_ns}}}line", "240")
-                    sp_elem.set(f"{{{w_ns}}}lineRule", "auto")
-                    p_pr.append(sp_elem)
-                else:
-                    sp_nodes[0].set(f"{{{w_ns}}}after", "20")
-                    if route_num > 1:
-                        sp_nodes[0].set(f"{{{w_ns}}}before", "100")
+                    # Tight paragraph spacing so heading and table are visually and structurally bonded
+                    sp_nodes = p_pr.xpath("./w:spacing", namespaces=nsmap)
+                    if not sp_nodes:
+                        sp_elem = etree.Element(f"{{{w_ns}}}spacing")
+                        sp_elem.set(f"{{{w_ns}}}before", "100" if route_num > 1 else "0")
+                        sp_elem.set(f"{{{w_ns}}}after", "20")
+                        sp_elem.set(f"{{{w_ns}}}line", "240")
+                        sp_elem.set(f"{{{w_ns}}}lineRule", "auto")
+                        p_pr.append(sp_elem)
+                    else:
+                        sp_nodes[0].set(f"{{{w_ns}}}after", "20")
+                        if route_num > 1:
+                            sp_nodes[0].set(f"{{{w_ns}}}before", "100")
 
-                runs = cloned_heading.xpath("./w:r", namespaces=nsmap)
-                heading_text = f"{route_num}) {origin.upper()} TO {dest.upper()}"
-                if runs:
-                    first_t = runs[0].xpath(".//w:t", namespaces=nsmap)
-                    if first_t:
-                        first_t[0].text = heading_text
-                        first_t[0].set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
-                    _set_run_cambria(runs[0])
-                    for r in runs[1:]:
-                        cloned_heading.remove(r)
-                new_route_elements.append(cloned_heading)
+                    runs = cloned_heading.xpath("./w:r", namespaces=nsmap)
+                    heading_text = f"{route_num}) {origin.upper()} TO {dest.upper()}"
+                    if runs:
+                        first_t = runs[0].xpath(".//w:t", namespaces=nsmap)
+                        if first_t:
+                            first_t[0].text = heading_text
+                            first_t[0].set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+                        _set_run_cambria(runs[0])
+                        for r in runs[1:]:
+                            cloned_heading.remove(r)
+                    new_route_elements.append(cloned_heading)
 
-                # Cloned OLE paragraph
-                cloned_ole = copy_module.deepcopy(ole_elem)
-                if f"{{{w14_ns}}}paraId" in cloned_ole.attrib:
-                    cloned_ole.attrib[f"{{{w14_ns}}}paraId"] = f"{0x11000001 + route_num * 2:08X}"
+                    # Cloned OLE paragraph
+                    cloned_ole = copy_module.deepcopy(ole_elem)
+                    if f"{{{w14_ns}}}paraId" in cloned_ole.attrib:
+                        cloned_ole.attrib[f"{{{w14_ns}}}paraId"] = f"{0x11000001 + route_num * 2:08X}"
 
-                ole_p_prs = cloned_ole.xpath("./w:pPr", namespaces=nsmap)
-                if not ole_p_prs:
-                    ole_p_pr = etree.Element(f"{{{w_ns}}}pPr")
-                    cloned_ole.insert(0, ole_p_pr)
-                else:
-                    ole_p_pr = ole_p_prs[0]
+                    ole_p_prs = cloned_ole.xpath("./w:pPr", namespaces=nsmap)
+                    if not ole_p_prs:
+                        ole_p_pr = etree.Element(f"{{{w_ns}}}pPr")
+                        cloned_ole.insert(0, ole_p_pr)
+                    else:
+                        ole_p_pr = ole_p_prs[0]
 
-                if not ole_p_pr.xpath("./w:keepLines", namespaces=nsmap):
-                    ole_p_pr.append(etree.Element(f"{{{w_ns}}}keepLines"))
+                    if not ole_p_pr.xpath("./w:keepLines", namespaces=nsmap):
+                        ole_p_pr.append(etree.Element(f"{{{w_ns}}}keepLines"))
 
-                ole_sp_nodes = ole_p_pr.xpath("./w:spacing", namespaces=nsmap)
-                if not ole_sp_nodes:
-                    ole_sp = etree.Element(f"{{{w_ns}}}spacing")
-                    ole_sp.set(f"{{{w_ns}}}before", "0")
-                    ole_sp.set(f"{{{w_ns}}}after", "40")
-                    ole_sp.set(f"{{{w_ns}}}line", "240")
-                    ole_sp.set(f"{{{w_ns}}}lineRule", "auto")
-                    ole_p_pr.append(ole_sp)
-                else:
-                    ole_sp_nodes[0].set(f"{{{w_ns}}}before", "0")
+                    ole_sp_nodes = ole_p_pr.xpath("./w:spacing", namespaces=nsmap)
+                    if not ole_sp_nodes:
+                        ole_sp = etree.Element(f"{{{w_ns}}}spacing")
+                        ole_sp.set(f"{{{w_ns}}}before", "0")
+                        ole_sp.set(f"{{{w_ns}}}after", "40")
+                        ole_sp.set(f"{{{w_ns}}}line", "240")
+                        ole_sp.set(f"{{{w_ns}}}lineRule", "auto")
+                        ole_p_pr.append(ole_sp)
+                    else:
+                        ole_sp_nodes[0].set(f"{{{w_ns}}}before", "0")
 
-                for obj in cloned_ole.xpath(".//w:object", namespaces=nsmap):
-                    obj.set(f"{{{w_ns}}}dxaOrig", str(shape_width_dxa))
-                    obj.set(f"{{{w_ns}}}dyaOrig", str(route_dya))
-                    # Remove duplicated v:shapetype on subsequent routes to avoid ID collision
-                    if route_num > 1:
-                        for st in obj.xpath(".//v:shapetype", namespaces=nsmap):
-                            obj.remove(st)
+                    for obj in cloned_ole.xpath(".//w:object", namespaces=nsmap):
+                        obj.set(f"{{{w_ns}}}dxaOrig", str(shape_width_dxa))
+                        obj.set(f"{{{w_ns}}}dyaOrig", str(route_dya))
+                        # Remove duplicated v:shapetype on subsequent routes to avoid ID collision
+                        if route_num > 1:
+                            for st in obj.xpath(".//v:shapetype", namespaces=nsmap):
+                                obj.remove(st)
 
-                for shape in cloned_ole.xpath(".//v:shape", namespaces=nsmap):
-                    shape.set("id", shape_id)
-                    shape.set("style", f"width:{route_width_pt:.2f}pt;height:{route_height_pt:.2f}pt")
+                    for shape in cloned_ole.xpath(".//v:shape", namespaces=nsmap):
+                        shape.set("id", shape_id)
+                        shape.set("style", f"width:{route_width_pt:.2f}pt;height:{route_height_pt:.2f}pt")
 
-                for img_data in cloned_ole.xpath(".//v:imagedata", namespaces=nsmap):
-                    img_data.set(f"{{{r_ns}}}id", img_rid)
+                    for img_data in cloned_ole.xpath(".//v:imagedata", namespaces=nsmap):
+                        img_data.set(f"{{{r_ns}}}id", img_rid)
 
-                for ole_obj in cloned_ole.xpath(".//o:OLEObject", namespaces=nsmap):
-                    ole_obj.set("ShapeID", shape_id)
-                    ole_obj.set("ObjectID", object_id)
-                    ole_obj.set(f"{{{r_ns}}}id", pkg_rid)
+                    for ole_obj in cloned_ole.xpath(".//o:OLEObject", namespaces=nsmap):
+                        ole_obj.set("ShapeID", shape_id)
+                        ole_obj.set("ObjectID", object_id)
+                        ole_obj.set(f"{{{r_ns}}}id", pkg_rid)
 
-                new_route_elements.append(cloned_ole)
+                    new_route_elements.append(cloned_ole)
 
-                if spacing_elem is not None:
-                    cloned_spacing = copy_module.deepcopy(spacing_elem)
-                    if f"{{{w14_ns}}}paraId" in cloned_spacing.attrib:
-                        cloned_spacing.attrib[f"{{{w14_ns}}}paraId"] = f"{0x11000002 + route_num * 2:08X}"
-                    new_route_elements.append(cloned_spacing)
+                    if spacing_elem is not None:
+                        cloned_spacing = copy_module.deepcopy(spacing_elem)
+                        if f"{{{w14_ns}}}paraId" in cloned_spacing.attrib:
+                            cloned_spacing.attrib[f"{{{w14_ns}}}paraId"] = f"{0x11000002 + route_num * 2:08X}"
+                        new_route_elements.append(cloned_spacing)
         finally:
             if excel_session is not None:
                 try:
