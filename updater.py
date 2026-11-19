@@ -21,7 +21,7 @@ from tkinter import messagebox
 APP_VERSION = "1.0.0"
 
 # Target Public GitHub repository for releases
-GITHUB_REPO = "shrey2250/LogiDesk-release"
+GITHUB_REPO = "shrey2250/Logi-desk-exe"
 
 
 def _parse_version(v_str: str):
