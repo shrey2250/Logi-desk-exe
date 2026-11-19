@@ -235,6 +235,9 @@ class TallyConverterApp(ctk.CTk):
         self.bill_mapping_path = ""
         self.bill_template_path = ""
         self.recalc_bill_path = ""
+        self.recent_bills = self._load_recent_bills()
+        self.recent_bills_map = {}
+        self.recalc_bill_combo = None
 
         self.xml_frame_root = None
         self.bill_frame_root = None
@@ -1192,13 +1195,20 @@ class TallyConverterApp(ctk.CTk):
         recalc_row.pack(fill="x")
         recalc_row.grid_columnconfigure(0, weight=1)
 
-        self.recalc_bill_label = self._ghost_label(recalc_row, "No bill selected for recalculation")
-        self.recalc_bill_label.grid(row=0, column=0, sticky="ew", padx=(0, 10))
+        self.recalc_bill_combo = self._combo(
+            recalc_row,
+            values=["No recent bills"],
+            command=self._on_recent_bill_selected,
+            width=360,
+        )
+        self.recalc_bill_combo.grid(row=0, column=0, sticky="ew", padx=(0, 10))
 
         self._secondary_btn(recalc_row, "Choose Bill…", self.select_recalc_bill, width=110).grid(row=0, column=1, padx=(0, 10))
 
         self.recalc_bill_button = self._primary_btn(recalc_row, "🔄 Recalculate Totals", self.recalculate_bill_from_ui, width=170)
         self.recalc_bill_button.grid(row=0, column=2)
+
+        self._update_recent_bills_ui()
 
     def _refresh_bill_company_options(self, event=None):
         if not self.bill_excel_path:
@@ -1376,9 +1386,7 @@ class TallyConverterApp(ctk.CTk):
                 )
                 def _on_success():
                     self.generate_bill_button.configure(state="normal", text="Generate Word Bill →")
-                    self.recalc_bill_path = output_path
-                    if hasattr(self, "recalc_bill_label") and self.recalc_bill_label:
-                        self.recalc_bill_label.configure(text=os.path.basename(output_path), text_color=self.T_PRIMARY)
+                    self._add_recent_bill(output_path)
                     messagebox.showinfo("Bill Generated", f"Bill saved successfully.\n\nRows: {result['rows']}\nRoutes: {result['routes']}\nGrand Total: ₹{result['grand_total']:,.2f}\n\nFile:\n{output_path}")
                     self._set_status("✓ Bill generated", self.GREEN)
                 self.after(0, _on_success)
@@ -1391,6 +1399,89 @@ class TallyConverterApp(ctk.CTk):
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    def _get_recent_bills_file(self) -> str:
+        cfg_dir = os.path.join(os.path.expanduser("~"), ".logidesk")
+        os.makedirs(cfg_dir, exist_ok=True)
+        return os.path.join(cfg_dir, "recent_bills.json")
+
+    def _load_recent_bills(self) -> List[str]:
+        try:
+            cfg_file = self._get_recent_bills_file()
+            if os.path.exists(cfg_file):
+                with open(cfg_file, "r", encoding="utf-8") as f:
+                    paths = json.load(f)
+                if isinstance(paths, list):
+                    valid = [p for p in paths if isinstance(p, str) and os.path.exists(p)]
+                    if valid:
+                        return valid[:5]
+        except Exception:
+            pass
+        # Discover existing bills in workspace if first run
+        try:
+            found = []
+            for f in sorted(glob.glob("*.docx"), key=os.path.getmtime, reverse=True):
+                if not f.startswith("~$") and "template" not in f.lower():
+                    found.append(os.path.abspath(f))
+            return found[:5]
+        except Exception:
+            return []
+
+    def _save_recent_bills(self, paths: List[str]) -> None:
+        try:
+            cfg_file = self._get_recent_bills_file()
+            with open(cfg_file, "w", encoding="utf-8") as f:
+                json.dump(paths[:5], f, indent=2)
+        except Exception:
+            pass
+
+    def _add_recent_bill(self, full_path: str) -> None:
+        if not full_path or not os.path.exists(full_path):
+            return
+        norm = os.path.abspath(full_path)
+        existing = [p for p in getattr(self, "recent_bills", []) if os.path.exists(p) and os.path.abspath(p) != norm]
+        self.recent_bills = ([norm] + existing)[:5]
+        self._save_recent_bills(self.recent_bills)
+        self._update_recent_bills_ui(selected_path=norm)
+
+    def _update_recent_bills_ui(self, selected_path: str = None) -> None:
+        if not hasattr(self, "recalc_bill_combo") or not self.recalc_bill_combo:
+            return
+
+        self.recent_bills_map = {}
+        display_names = []
+        for p in getattr(self, "recent_bills", []):
+            if not os.path.exists(p):
+                continue
+            bname = os.path.basename(p)
+            disp = bname
+            counter = 2
+            while disp in self.recent_bills_map and self.recent_bills_map[disp] != p:
+                disp = f"{bname} ({counter})"
+                counter += 1
+            self.recent_bills_map[disp] = p
+            display_names.append(disp)
+
+        if not display_names:
+            self.recalc_bill_combo.configure(values=["No recent bills (Choose Bill…)"])
+            self.recalc_bill_combo.set("No recent bills (Choose Bill…)")
+            self.recalc_bill_path = ""
+        else:
+            self.recalc_bill_combo.configure(values=display_names)
+            target_disp = display_names[0]
+            if selected_path:
+                norm_target = os.path.abspath(selected_path)
+                for d, p in self.recent_bills_map.items():
+                    if os.path.abspath(p) == norm_target:
+                        target_disp = d
+                        break
+            self.recalc_bill_combo.set(target_disp)
+            self.recalc_bill_path = self.recent_bills_map.get(target_disp, "")
+
+    def _on_recent_bill_selected(self, chosen_disp: str) -> None:
+        if hasattr(self, "recent_bills_map") and chosen_disp in self.recent_bills_map:
+            self.recalc_bill_path = self.recent_bills_map[chosen_disp]
+            self._set_status(f"✓ Selected for recalculation: {chosen_disp}", self.GREEN)
+
     def select_recalc_bill(self):
         path = filedialog.askopenfilename(
             title="Select Word Bill to Recalculate",
@@ -1398,8 +1489,7 @@ class TallyConverterApp(ctk.CTk):
         )
         if not path:
             return
-        self.recalc_bill_path = path
-        self.recalc_bill_label.configure(text=os.path.basename(path), text_color=self.T_PRIMARY)
+        self._add_recent_bill(path)
         self._set_status(f"✓ Selected for recalculation: {os.path.basename(path)}", self.GREEN)
 
     def recalculate_bill_from_ui(self):
@@ -1426,6 +1516,7 @@ class TallyConverterApp(ctk.CTk):
                 result = self.bill_service.recalculate_bill_document(docx_path)
                 def _on_success():
                     self.recalc_bill_button.configure(state="normal", text="🔄 Recalculate Totals")
+                    self._add_recent_bill(docx_path)
                     msg = (
                         "Bill Totals Recalculated Successfully!\n\n"
                         f"Routes Scanned: {result['routes_count']}\n"
