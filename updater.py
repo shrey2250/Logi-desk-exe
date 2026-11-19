@@ -18,7 +18,7 @@ import customtkinter as ctk
 from tkinter import messagebox
 
 # Current local application version
-APP_VERSION = "1.0.5"
+APP_VERSION = "1.0.6"
 
 # Target Public GitHub repository for releases
 GITHUB_REPO = "shrey2250/Logi-desk-exe"

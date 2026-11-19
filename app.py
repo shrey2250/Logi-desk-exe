@@ -1407,36 +1407,37 @@ class TallyConverterApp(ctk.CTk):
     def _format_bill_filename(bill_no: str, bill_date: str = "") -> str:
         s = str(bill_no).strip()
 
-        # Pattern 1: e.g. "26-27/003", "26-27-003", "26-27/3" -> BILL COPY 003-26-27.docx
-        m1 = re.match(r"^(\d{2}-\d{2})[-/](\d+)$", s)
-        if m1:
-            year, num = m1.group(1), int(m1.group(2))
-            return f"BILL COPY {num:03d}-{year}.docx"
+        def _is_fy(text: str) -> bool:
+            m = re.match(r"^(\d{2})-(\d{2})$", text)
+            return bool(m and int(m.group(2)) == (int(m.group(1)) + 1) % 100)
 
-        # Pattern 2: e.g. "003-26-27", "3-26-27", "003/26-27" -> BILL COPY 003-26-27.docx
-        m2 = re.match(r"^(\d+)[-/](\d{2}-\d{2})$", s)
-        if m2:
-            num, year = int(m2.group(1)), m2.group(2)
-            return f"BILL COPY {num:03d}-{year}.docx"
+        # Default FY from bill_date (e.g. '01.02.26' -> '26-27') or fallback '26-27'
+        fy = "26-27"
+        if bill_date:
+            m_dt = re.search(r"(\d{2})$", str(bill_date).strip())
+            if m_dt:
+                y = int(m_dt.group(1))
+                fy = f"{y:02d}-{(y+1)%100:02d}"
 
-        # Pattern 3: e.g. "26-27/44A"
-        m3 = re.match(r"^(\d{2}-\d{2})[-/](.+)$", s)
-        if m3:
-            year, num_part = m3.group(1), m3.group(2)
-            if num_part.isdigit():
-                return f"BILL COPY {int(num_part):03d}-{year}.docx"
-            return f"BILL COPY {num_part}-{year}.docx"
+        # Pattern 1: e.g. "44-26-27", "003-26-27", "44/26-27" (num-FY)
+        m_sfx = re.match(r"^(.+?)[-/](\d{2}-\d{2})$", s)
+        if m_sfx and _is_fy(m_sfx.group(2)):
+            rest, year = m_sfx.group(1), m_sfx.group(2)
+            if rest.isdigit():
+                return f"BILL COPY {int(rest):03d}-{year}.docx"
+            return f"BILL COPY {rest}-{year}.docx"
 
-        # Pattern 4: just numbers e.g. "3" or "003" or "44"
+        # Pattern 2: e.g. "26-27/44", "26-27-003", "26-27/044" (FY-num)
+        m_pfx = re.match(r"^(\d{2}-\d{2})[-/](.+)$", s)
+        if m_pfx and _is_fy(m_pfx.group(1)):
+            year, rest = m_pfx.group(1), m_pfx.group(2)
+            if rest.isdigit():
+                return f"BILL COPY {int(rest):03d}-{year}.docx"
+            return f"BILL COPY {rest}-{year}.docx"
+
+        # Pattern 3: plain digits e.g. "44" or "3" or "003"
         if s.isdigit():
-            num = int(s)
-            fy = "26-27"
-            if bill_date:
-                m_dt = re.search(r"(\d{2})$", str(bill_date).strip())
-                if m_dt:
-                    y = int(m_dt.group(1))
-                    fy = f"{y:02d}-{y+1:02d}"
-            return f"BILL COPY {num:03d}-{fy}.docx"
+            return f"BILL COPY {int(s):03d}-{fy}.docx"
 
         # Fallback: clean invalid filename characters and ensure "BILL COPY" prefix
         cleaned = re.sub(r'[/\\:*?"<>|]+', '-', s).strip(" -")

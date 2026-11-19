@@ -2215,8 +2215,13 @@ class BillGeneratorService:
         gt = grand_total
         total_str = format_indian_currency(gt)
 
+        # Template already has "Bill no.: 26-27/" before [BILL NO], so ensure
+        # we don't accidentally duplicate "26-27/" if user enters "26-27/44".
+        display_bill_no = str(bill_no).strip()
+        display_bill_no = re.sub(r'^\d{2}-\d{2}[-/]', '', display_bill_no)
+
         replacements = {
-            "[BILL NO]":         bill_no,
+            "[BILL NO]":         display_bill_no,
             "[DATE]":            bill_date_str,
             "[COMPANY NAME]":    company_name,
             "[ADDRESS]":         address_full,
