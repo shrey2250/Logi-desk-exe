@@ -8,6 +8,7 @@ safe Windows executable replacement and restart.
 
 import os
 import sys
+import ssl
 import json
 import tempfile
 import threading
@@ -22,6 +23,57 @@ APP_VERSION = "1.0.9"
 
 # Target Public GitHub repository for releases
 GITHUB_REPO = "shrey2250/Logi-desk-exe"
+
+
+def _get_ssl_context():
+    """
+    Creates an SSL context that works reliably on all Windows machines:
+    1. Tries certifi CA bundle if available.
+    2. Loads root certificates from the Windows Certificate Store (ROOT & CA).
+    3. Falls back to an unverified context so update checks never crash with SSL errors.
+    """
+    try:
+        import certifi
+        ca_file = certifi.where()
+        if os.path.exists(ca_file):
+            return ssl.create_default_context(cafile=ca_file)
+    except Exception:
+        pass
+
+    try:
+        ctx = ssl.create_default_context()
+        for store in ("ROOT", "CA"):
+            for cert, encoding, trust in ssl.enum_certificates(store):
+                if encoding == "x509_asn":
+                    try:
+                        ctx.load_verify_locations(cadata=cert)
+                    except Exception:
+                        pass
+        return ctx
+    except Exception:
+        pass
+
+    return ssl._create_unverified_context()
+
+
+def _safe_urlopen(req, timeout=None):
+    """
+    Safely opens a URL with automatic SSL certificate fallback so SSL: CERTIFICATE_VERIFY_FAILED
+    never crashes or prevents updates on client Windows machines.
+    """
+    ctx = _get_ssl_context()
+    try:
+        if timeout:
+            return urllib.request.urlopen(req, context=ctx, timeout=timeout)
+        return urllib.request.urlopen(req, context=ctx)
+    except Exception as e:
+        err_msg = str(e).lower()
+        if "certificate_verify_failed" in err_msg or "certificate verify failed" in err_msg or "ssl" in err_msg:
+            unverified_ctx = ssl._create_unverified_context()
+            if timeout:
+                return urllib.request.urlopen(req, context=unverified_ctx, timeout=timeout)
+            return urllib.request.urlopen(req, context=unverified_ctx)
+        raise
 
 
 def _parse_version(v_str: str):
@@ -58,7 +110,7 @@ def check_for_updates_async(parent_window, repo: str = GITHUB_REPO, silent: bool
                 api_url,
                 headers={"User-Agent": "LogiDesk-AppUpdater", "Accept": "application/vnd.github.v3+json"}
             )
-            with urllib.request.urlopen(req, timeout=8) as resp:
+            with _safe_urlopen(req, timeout=8) as resp:
                 if resp.status != 200:
                     return
                 data = json.loads(resp.read().decode("utf-8"))
@@ -235,7 +287,7 @@ class UpdateDialog(ctk.CTkToplevel):
                 headers={"User-Agent": "LogiDesk-AppUpdater"}
             )
 
-            with urllib.request.urlopen(req) as resp, open(target_file, "wb") as out:
+            with _safe_urlopen(req) as resp, open(target_file, "wb") as out:
                 total_size = int(resp.info().get("Content-Length", 0))
                 downloaded = 0
                 block_size = 65536

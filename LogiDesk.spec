@@ -3,9 +3,11 @@ from PyInstaller.utils.hooks import collect_all
 
 datas = []
 binaries = []
-hiddenimports = ['openpyxl', 'win32com', 'win32com.client', 'docx', 'PIL', 'updater', 'bill_generator']
+hiddenimports = ['openpyxl', 'win32com', 'win32com.client', 'docx', 'PIL', 'updater', 'bill_generator', 'certifi']
 tmp_ret = collect_all('customtkinter')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_cert = collect_all('certifi')
+datas += tmp_cert[0]; binaries += tmp_cert[1]; hiddenimports += tmp_cert[2]
 
 
 a = Analysis(
