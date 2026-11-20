@@ -779,6 +779,12 @@ def _update_grand_total_xlsx(xlsx_bytes: bytes, grand_total: float, amount_words
     with zipfile.ZipFile(io.BytesIO(xlsx_bytes), "r") as zin:
         parts = {n: zin.read(n) for n in zin.namelist()}
 
+    if "xl/workbook.xml" in parts:
+        wb_xml = parts["xl/workbook.xml"].decode("utf-8")
+        wb_xml = re.sub(r'visibility="veryHidden"', 'visibility="visible"', wb_xml)
+        wb_xml = re.sub(r'visibility="hidden"', 'visibility="visible"', wb_xml)
+        parts["xl/workbook.xml"] = wb_xml.encode("utf-8")
+
     if "xl/sharedStrings.xml" in parts:
         sst_xml = parts["xl/sharedStrings.xml"].decode("utf-8")
         sst_xml = re.sub(r"\[TOTAL\]\s*=\s*0", total_str, sst_xml)
@@ -1047,6 +1053,8 @@ def _fill_embedded_workbook(
         parts = {n: zin.read(n) for n in zin.namelist()}
 
     wb_xml = parts["xl/workbook.xml"].decode("utf-8")
+    wb_xml = re.sub(r'visibility="veryHidden"', 'visibility="visible"', wb_xml)
+    wb_xml = re.sub(r'visibility="hidden"', 'visibility="visible"', wb_xml)
     if "<oleSize" in wb_xml:
         wb_xml = re.sub(
             r'<oleSize\s+ref="[^"]*"\s*/>',
@@ -2216,37 +2224,23 @@ class BillGeneratorService:
             raise ValueError("Invalid document.xml: <w:body> not found.")
         body = bodies[0]
 
-        # Check if the "BILL OF SUPPLY" line is currently in document.xml body.
-        # If so, move it to the document header so that Bill No, Bill of Supply,
-        # and Date repeat at the top of EVERY new continuation page!
-        bill_header_p = None
-        for p in body.xpath("./w:p", namespaces=nsmap):
-            txt = "".join(p.xpath(".//w:t/text()", namespaces=nsmap))
-            if "BILL OF SUPPLY" in txt:
-                bill_header_p = p
-                break
-
-        # Read all headers and footers from template
+        # Ensure Bill No & Date line is kept in the main body (OUT of header)
+        # as requested, preserving clean header spacing.
+        # If any header in the template contains "BILL OF SUPPLY", move it back to body top:
         header_trees = {}
-        target_hdr_tree = None
         with zipfile.ZipFile(template_path, "r") as z:
             for n in z.namelist():
                 if (n.startswith("word/header") or n.startswith("word/footer")) and n.endswith(".xml"):
                     hdr_xml = z.read(n)
                     htree = etree.fromstring(hdr_xml, parser)
+                    for hp in htree.xpath("./w:p", namespaces=nsmap):
+                        txt = "".join(hp.xpath(".//w:t/text()", namespaces=nsmap))
+                        if "BILL OF SUPPLY" in txt:
+                            body_txt = "".join(body.xpath(".//w:t/text()", namespaces=nsmap))
+                            if "BILL OF SUPPLY" not in body_txt:
+                                body.insert(0, copy_module.deepcopy(hp))
+                            htree.remove(hp)
                     header_trees[n] = htree
-                    htxt = "".join(htree.xpath(".//w:t/text()", namespaces=nsmap))
-                    if ("SHREY" in htxt or "LOGISTICS" in htxt or len(htree.xpath("./w:p", namespaces=nsmap)) > 1) and n.startswith("word/header"):
-                        target_hdr_tree = htree
-
-        if target_hdr_tree is None and "word/header2.xml" in header_trees:
-            target_hdr_tree = header_trees["word/header2.xml"]
-
-        if bill_header_p is not None and target_hdr_tree is not None:
-            target_hdr_txt = "".join(target_hdr_tree.xpath(".//w:t/text()", namespaces=nsmap))
-            if "BILL OF SUPPLY" not in target_hdr_txt:
-                target_hdr_tree.append(copy_module.deepcopy(bill_header_p))
-                body.remove(bill_header_p)
 
         # Text placeholder replacements
         addr1 = company_record.get("address_line_1", "").rstrip(", ")
@@ -2458,19 +2452,18 @@ class BillGeneratorService:
                     if not p_pr.xpath("./w:keepLines", namespaces=nsmap):
                         p_pr.append(etree.Element(f"{{{w_ns}}}keepLines"))
 
-                    # Tight paragraph spacing so heading and table are visually and structurally bonded
+                    # Spacing so heading has clean separation above and bonds with table below
                     sp_nodes = p_pr.xpath("./w:spacing", namespaces=nsmap)
                     if not sp_nodes:
                         sp_elem = etree.Element(f"{{{w_ns}}}spacing")
-                        sp_elem.set(f"{{{w_ns}}}before", "100" if route_num > 1 else "0")
-                        sp_elem.set(f"{{{w_ns}}}after", "20")
+                        sp_elem.set(f"{{{w_ns}}}before", "200" if route_num > 1 else "60")
+                        sp_elem.set(f"{{{w_ns}}}after", "40")
                         sp_elem.set(f"{{{w_ns}}}line", "240")
                         sp_elem.set(f"{{{w_ns}}}lineRule", "auto")
                         p_pr.append(sp_elem)
                     else:
-                        sp_nodes[0].set(f"{{{w_ns}}}after", "20")
-                        if route_num > 1:
-                            sp_nodes[0].set(f"{{{w_ns}}}before", "100")
+                        sp_nodes[0].set(f"{{{w_ns}}}after", "40")
+                        sp_nodes[0].set(f"{{{w_ns}}}before", "200" if route_num > 1 else "60")
 
                     runs = cloned_heading.xpath("./w:r", namespaces=nsmap)
                     heading_text = f"{route_num}) {origin.upper()} TO {dest.upper()}"
@@ -2754,7 +2747,28 @@ class BillGeneratorService:
                     with open(tmp_emf, "rb") as f_emf:
                         all_parts[gt_item["img_part"]] = f_emf.read()
 
-        # Ensure "BILL OF SUPPLY" line is placed in header so it repeats on every continuation page
+        # 1. Ensure all embedded Excel workbooks have visibility="visible" (not veryHidden)
+        # so double-clicking any table in Word immediately opens Excel ready for editing!
+        for part_name, part_data in list(all_parts.items()):
+            if part_name.endswith(".xlsx"):
+                try:
+                    with zipfile.ZipFile(io.BytesIO(part_data), "r") as z_in:
+                        subparts = {sn: z_in.read(sn) for sn in z_in.namelist()}
+                    if "xl/workbook.xml" in subparts:
+                        wxml = subparts["xl/workbook.xml"].decode("utf-8")
+                        if 'visibility="veryHidden"' in wxml or 'visibility="hidden"' in wxml:
+                            wxml = re.sub(r'visibility="veryHidden"', 'visibility="visible"', wxml)
+                            wxml = re.sub(r'visibility="hidden"', 'visibility="visible"', wxml)
+                            subparts["xl/workbook.xml"] = wxml.encode("utf-8")
+                            b = io.BytesIO()
+                            with zipfile.ZipFile(b, "w", zipfile.ZIP_DEFLATED) as z_out:
+                                for sn, sd in subparts.items():
+                                    z_out.writestr(sn, sd)
+                            all_parts[part_name] = b.getvalue()
+                except Exception:
+                    pass
+
+        # 2. Ensure "BILL OF SUPPLY" line is kept OUT of header (back into body if previously in header)
         if "word/document.xml" in all_parts:
             try:
                 parser = etree.XMLParser(recover=True, remove_blank_text=False)
@@ -2764,24 +2778,21 @@ class BillGeneratorService:
                 body_elems = doc_tree.xpath("./w:body", namespaces=nsmap)
                 if body_elems:
                     b = body_elems[0]
-                    bill_header_p = None
-                    for p in b.xpath("./w:p", namespaces=nsmap):
-                        txt = "".join(p.xpath(".//w:t/text()", namespaces=nsmap))
-                        if "BILL OF SUPPLY" in txt:
-                            bill_header_p = p
-                            break
-
-                    if bill_header_p is not None:
-                        for part_name in list(all_parts.keys()):
-                            if part_name.startswith("word/header") and part_name.endswith(".xml"):
-                                htree = etree.fromstring(all_parts[part_name], parser)
-                                htxt = "".join(htree.xpath(".//w:t/text()", namespaces=nsmap))
-                                if ("SHREY" in htxt or "LOGISTICS" in htxt or len(htree.xpath("./w:p", namespaces=nsmap)) > 1) and "BILL OF SUPPLY" not in htxt:
-                                    htree.append(copy_module.deepcopy(bill_header_p))
-                                    b.remove(bill_header_p)
-                                    all_parts[part_name] = etree.tostring(htree, encoding="utf-8", xml_declaration=True, standalone=True)
-                                    all_parts["word/document.xml"] = etree.tostring(doc_tree, encoding="utf-8", xml_declaration=True, standalone=True)
-                                    break
+                    for part_name in list(all_parts.keys()):
+                        if part_name.startswith("word/header") and part_name.endswith(".xml"):
+                            htree = etree.fromstring(all_parts[part_name], parser)
+                            modified_hdr = False
+                            for hp in htree.xpath("./w:p", namespaces=nsmap):
+                                htxt = "".join(hp.xpath(".//w:t/text()", namespaces=nsmap))
+                                if "BILL OF SUPPLY" in htxt:
+                                    body_txt = "".join(b.xpath(".//w:t/text()", namespaces=nsmap))
+                                    if "BILL OF SUPPLY" not in body_txt:
+                                        b.insert(0, copy_module.deepcopy(hp))
+                                    htree.remove(hp)
+                                    modified_hdr = True
+                            if modified_hdr:
+                                all_parts[part_name] = etree.tostring(htree, encoding="utf-8", xml_declaration=True, standalone=True)
+                                all_parts["word/document.xml"] = etree.tostring(doc_tree, encoding="utf-8", xml_declaration=True, standalone=True)
             except Exception:
                 pass
 
