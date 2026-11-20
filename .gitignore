@@ -1,25 +1,47 @@
-# Environments
+# Python source code & scripts (private local development)
+*.py
+*.py[cod]
+*$py.class
+__pycache__/
+*.spec
+*.bat
+requirements.txt
+*.ico
+
+# Business templates & Excel mappings (private)
+*.xlsx
+*.xls
+*.docx
+*.doc
+
+# Environments & virtualenvs
 .venv/
 env/
 venv/
 ENV/
-
-__pycache__/
-*.py[cod]
-*$py.class
 
 # PyInstaller & Build artifacts
 build/
 dist/
 *.manifest
 *.spec.bak
+
+# Executables (ignore all except main LogiDesk.exe)
 *.exe
+!LogiDesk.exe
 
-# Generated Bills & Output files
+# Temporary / test / scratch files
 *_*.docx
-
-# Temporary / test files
 *.bak
 *.tmp
 *.docx.tmp
 test_*.docx
+*.png
+*.emf
+*.jpeg
+*.jpg
+scratch/
+
+# Explicitly allow distribution executable and readme
+!README.md
+!.gitignore
