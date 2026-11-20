@@ -1026,9 +1026,7 @@ def _fill_embedded_workbook(
         ws.sheet_view.zoomScale = 100
         ws.sheet_view.zoomScaleNormal = 100
 
-    # Ensure proper column dimensions and thin borders for all cells
-    if "sac_code" in hm:
-        ws.column_dimensions[hm["sac_code"]].width = 11.0
+    # Preserve template's exact column dimensions so table width remains fixed and consistent
     if "remarks" in hm:
         ws.column_dimensions[hm["remarks"]].width = 18.85
 
@@ -2405,10 +2403,10 @@ class BillGeneratorService:
                         route_img_bytes = template_img_bytes
                         route_img_ext = "emf" if (ole_info.image_part and ole_info.image_part.endswith(".emf")) else "png"
 
-                    # Height & Width calculation: match exact live Excel COM measurements
-                    # so the table is created at its full bigger size and stays the same size when clicked
-                    route_width_pt = measured_w if (measured_w is not None) else 487.2
-                    route_height_pt = measured_h if (measured_h is not None) else (17.25 + (route_total_rows - 1) * 14.5)
+                    # Keep fixed table width exactly matching the template's table width (478.2pt)
+                    # so that opening and closing in Excel NEVER resizes or distorts any table.
+                    route_width_pt = ole_info.shape_width_pt if (ole_info.shape_width_pt is not None) else 478.2
+                    route_height_pt = (17.25 + (route_total_rows - 1) * 14.5) if (route_total_rows > 1) else (measured_h if measured_h is not None else 60.0)
                     shape_width_dxa = int(round(route_width_pt * 20))
                     route_dya = int(round(route_height_pt * 20))
 
@@ -2748,10 +2746,25 @@ class BillGeneratorService:
                         all_parts[gt_item["img_part"]] = f_emf.read()
 
         # 1. Ensure all embedded Excel workbooks have visibility="visible" (not veryHidden)
-        # so double-clicking any table in Word immediately opens Excel ready for editing!
+        # and standard column widths (Column H <= 8.0) so double-clicking any table in Word
+        # immediately opens Excel ready for editing and NEVER resizes or distorts when closed!
         for part_name, part_data in list(all_parts.items()):
             if part_name.endswith(".xlsx"):
                 try:
+                    # Normalize column width for route workbooks
+                    wb_fix = openpyxl.load_workbook(io.BytesIO(part_data), data_only=False)
+                    ws_fix = wb_fix.active
+                    wb_modified = False
+                    if ws_fix.max_column >= 8 and "H" in ws_fix.column_dimensions:
+                        w_h = ws_fix.column_dimensions["H"].width
+                        if w_h and w_h > 8.5:
+                            ws_fix.column_dimensions["H"].width = 7.85546875
+                            wb_modified = True
+                    if wb_modified:
+                        buf_fix = io.BytesIO()
+                        wb_fix.save(buf_fix)
+                        part_data = buf_fix.getvalue()
+
                     with zipfile.ZipFile(io.BytesIO(part_data), "r") as z_in:
                         subparts = {sn: z_in.read(sn) for sn in z_in.namelist()}
                     if "xl/workbook.xml" in subparts:
@@ -2765,17 +2778,23 @@ class BillGeneratorService:
                                 for sn, sd in subparts.items():
                                     z_out.writestr(sn, sd)
                             all_parts[part_name] = b.getvalue()
+                        else:
+                            all_parts[part_name] = part_data
+                    else:
+                        all_parts[part_name] = part_data
                 except Exception:
                     pass
 
-        # 2. Ensure "BILL OF SUPPLY" line is kept OUT of header (back into body if previously in header)
+        # 2. Ensure "BILL OF SUPPLY" line is kept OUT of header and reset any distorted table widths
         if "word/document.xml" in all_parts:
             try:
                 parser = etree.XMLParser(recover=True, remove_blank_text=False)
                 doc_tree = etree.fromstring(all_parts["word/document.xml"], parser)
                 w_ns = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
-                nsmap = {"w": w_ns}
+                v_ns = "urn:schemas-microsoft-com:vml"
+                nsmap = {"w": w_ns, "v": v_ns}
                 body_elems = doc_tree.xpath("./w:body", namespaces=nsmap)
+                modified_doc = False
                 if body_elems:
                     b = body_elems[0]
                     for part_name in list(all_parts.keys()):
@@ -2792,7 +2811,24 @@ class BillGeneratorService:
                                     modified_hdr = True
                             if modified_hdr:
                                 all_parts[part_name] = etree.tostring(htree, encoding="utf-8", xml_declaration=True, standalone=True)
-                                all_parts["word/document.xml"] = etree.tostring(doc_tree, encoding="utf-8", xml_declaration=True, standalone=True)
+                                modified_doc = True
+
+                # Reset any table shape widths that expanded beyond template standard (478.2pt)
+                for sh in doc_tree.xpath(".//v:shape", namespaces=nsmap):
+                    st = sh.attrib.get("style", "")
+                    m_w = re.search(r'width:\s*([0-9.]+)pt', st)
+                    if m_w and float(m_w.group(1)) > 485:
+                        sh.attrib["style"] = re.sub(r'width:\s*[0-9.]+pt', 'width:478.20pt', st)
+                        modified_doc = True
+
+                for obj in doc_tree.xpath(".//w:object", namespaces=nsmap):
+                    dxa = obj.attrib.get(f"{{{w_ns}}}dxaOrig")
+                    if dxa and int(dxa) > 9600:
+                        obj.attrib[f"{{{w_ns}}}dxaOrig"] = "9564"
+                        modified_doc = True
+
+                if modified_doc:
+                    all_parts["word/document.xml"] = etree.tostring(doc_tree, encoding="utf-8", xml_declaration=True, standalone=True)
             except Exception:
                 pass
 
