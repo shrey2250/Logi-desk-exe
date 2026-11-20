@@ -13,6 +13,7 @@ requirements.txt
 *.xls
 *.docx
 *.doc
+*.pdf
 
 # Environments & virtualenvs
 .venv/
