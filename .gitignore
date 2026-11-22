@@ -41,6 +41,7 @@ test_*.docx
 *.emf
 *.jpeg
 *.jpg
+*.json
 scratch/
 
 # Explicitly allow distribution executable and readme
